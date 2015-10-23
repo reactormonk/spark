@@ -27,6 +27,7 @@
 #   SPARK_PID_DIR   The pid files are stored. /tmp by default.
 #   SPARK_IDENT_STRING   A string representing this instance of spark. $USER by default
 #   SPARK_NICENESS The scheduling priority for daemons. Defaults to 0.
+#   SPARK_DONT_DAEMONIZE Doesn't fork and writes logs to stdout/err.
 ##
 
 usage="Usage: spark-daemon.sh [--config <conf-dir>] (start|stop|submit|status) <spark-command> <spark-instance-number> <args...>"
@@ -140,17 +141,29 @@ run_command() {
     rsync -a -e ssh --delete --exclude=.svn --exclude='logs/*' --exclude='contrib/hod/logs/*' "$SPARK_MASTER/" "$SPARK_HOME"
   fi
 
-  spark_rotate_log "$log"
-  echo "starting $command, logging to $log"
+  if [[ -n $SPARK_DONT_DAEMONIZE ]]; then
+    spark_rotate_log "$log"
+    echo "starting $command, logging to $log"
+  fi
 
   case "$mode" in
     (class)
-      nohup nice -n "$SPARK_NICENESS" "$SPARK_PREFIX"/bin/spark-class $command "$@" >> "$log" 2>&1 < /dev/null &
+      PATH="$SPARK_PREFIX"/bin
+      if [[ -n $SPARK_DONT_DAEMONIZE ]]; then
+        nice -n "$SPARK_NICENESS" spark-class "$command" "$@"
+      else
+        disown nice -n "$SPARK_NICENESS" spark-class "$command" "$@" >> "$log" 2>&1 </dev/null &
+      fi 
       newpid="$!"
       ;;
 
     (submit)
-      nohup nice -n "$SPARK_NICENESS" "$SPARK_PREFIX"/bin/spark-submit --class $command "$@" >> "$log" 2>&1 < /dev/null &
+      PATH="$SPARK_PREFIX"/bin
+      if [[ -n $SPARK_DONT_DAEMONIZE ]]; then
+        disown nice -n "$SPARK_NICENESS" spark-submit --class "$command" "$@" >> "$log" 2>&1 < /dev/null &
+      else
+        nice -n "$SPARK_NICENESS" spark-submit --class "$command" "$@"
+      fi 
       newpid="$!"
       ;;
 
@@ -160,13 +173,15 @@ run_command() {
       ;;
   esac
 
-  echo "$newpid" > "$pid"
-  sleep 2
-  # Check if the process has died; in that case we'll tail the log so the user can see
-  if [[ ! $(ps -p "$newpid" -o comm=) =~ "java" ]]; then
-    echo "failed to launch $command:"
-    tail -2 "$log" | sed 's/^/  /'
-    echo "full log in $log"
+  if [[ -n $SPARK_DOWN_FORK ]]; then
+    echo "$newpid" > "$pid"
+    sleep 2
+    # Check if the process has died; in that case we'll tail the log so the user can see
+    if [[ ! $(ps -p "$newpid" -o comm=) =~ "java" ]]; then
+      echo "failed to launch $command:"
+      tail -2 "$log" | sed 's/^/  /'
+      echo "full log in $log"
+    fi
   fi
 }
 
